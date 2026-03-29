@@ -2,7 +2,10 @@ package api
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"conductor/internal/store"
@@ -353,12 +356,25 @@ func (s *Server) handleAgentChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Ensure session exists and persist both turns.
+	s.db.GetOrCreateChatSession(r.Context(), agentID) //nolint
+	s.db.AppendChatMessage(r.Context(), agentID, "user", body.Message)      //nolint
+	s.db.AppendChatMessage(r.Context(), agentID, "assistant", reply)        //nolint
 	writeJSON(w, http.StatusOK, map[string]string{"reply": reply})
 }
 
 func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
-	// For now return empty — full chat session persistence is Phase 5.
-	writeJSON(w, http.StatusOK, []interface{}{})
+	agentID, err := uuid.Parse(chi.URLParam(r, "agentID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid agent id"})
+		return
+	}
+	msgs, err := s.db.GetChatHistory(r.Context(), agentID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, msgs)
 }
 
 // ── Issues ────────────────────────────────────────────────────────────────────
@@ -556,8 +572,54 @@ func (s *Server) handleGrantFSPermission(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleRevokeFSPermission(w http.ResponseWriter, r *http.Request) {
-	// permID is "agentID:path" encoded — simplified for now; proper UUID perm ID in DB is fine too.
+	permID, err := uuid.Parse(chi.URLParam(r, "permID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid perm id"})
+		return
+	}
+	if err := s.db.RevokeFSPermissionByID(r.Context(), permID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleFSBrowse(w http.ResponseWriter, r *http.Request) {
+	companyID, _ := companyIDFromCtx(r)
+	relPath := r.URL.Query().Get("path")
+	if relPath == "" {
+		relPath = "/"
+	}
+	fsRoot := filepath.Join("/conductor/companies", companyID.String(), "fs")
+	target := filepath.Join(fsRoot, filepath.Clean("/"+relPath))
+	if !strings.HasPrefix(target, fsRoot) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
+		return
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeJSON(w, http.StatusOK, []interface{}{})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	type FSEntry struct {
+		Name  string `json:"name"`
+		IsDir bool   `json:"is_dir"`
+		Size  int64  `json:"size"`
+	}
+	result := make([]FSEntry, 0, len(entries))
+	for _, e := range entries {
+		info, _ := e.Info()
+		size := int64(0)
+		if info != nil {
+			size = info.Size()
+		}
+		result = append(result, FSEntry{Name: e.Name(), IsDir: e.IsDir(), Size: size})
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // ── Audit & Notifications ─────────────────────────────────────────────────────
