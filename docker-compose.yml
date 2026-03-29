@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: conductor
+      POSTGRES_USER: conductor
+      POSTGRES_PASSWORD: conductor
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U conductor"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    image: postgres:16-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: conductor
+    volumes:
+      - ./migrations:/migrations
+    command: >
+      psql -h postgres -U conductor -d conductor
+      -f /migrations/001_initial.sql
+    restart: on-failure
+
+  conductor:
+    build: .
+    ports:
+      - "3100:3100"
+      - "2222:2222"
+    environment:
+      DATABASE_URL: postgres://conductor:conductor@postgres:5432/conductor?sslmode=disable
+      CONDUCTOR_HTTP_ADDR: ":3100"
+      CONDUCTOR_SFTP_ADDR: ":2222"
+      CONDUCTOR_JWT_SECRET: change-me-in-production
+      CONDUCTOR_FS_ROOT: /conductor/fs
+      CONDUCTOR_STATIC_DIR: /app/web/dist
+    volumes:
+      - conductor_fs:/conductor/fs
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  conductor_fs:
