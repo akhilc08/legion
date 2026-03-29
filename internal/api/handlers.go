@@ -98,6 +98,9 @@ func (s *Server) handleListCompanies(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	if companies == nil {
+		companies = []store.Company{}
+	}
 	writeJSON(w, http.StatusOK, companies)
 }
 
@@ -192,6 +195,9 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	if agents == nil {
+		agents = []store.Agent{}
 	}
 	writeJSON(w, http.StatusOK, agents)
 }
@@ -386,6 +392,9 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	if issues == nil {
+		issues = []store.Issue{}
+	}
 	writeJSON(w, http.StatusOK, issues)
 }
 
@@ -508,6 +517,9 @@ func (s *Server) handleListPendingHires(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	if hires == nil {
+		hires = []store.PendingHire{}
+	}
 	writeJSON(w, http.StatusOK, hires)
 }
 
@@ -549,6 +561,9 @@ func (s *Server) handleListFSPermissions(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	if perms == nil {
+		perms = []store.FSPermission{}
 	}
 	writeJSON(w, http.StatusOK, perms)
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -93,7 +94,14 @@ func runMigrations(ctx context.Context, db *store.DB) error {
 		return err
 	}
 	_, err = db.Pool.Exec(ctx, string(data))
-	return err
+	if err != nil {
+		// Ignore "already exists" errors — schema is already applied.
+		if strings.Contains(err.Error(), "already exists") {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func envOr(key, fallback string) string {
