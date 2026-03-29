@@ -5,17 +5,18 @@ import { useAppStore } from '@/store/useAppStore'
 import { Sidebar } from '@/components/Layout/Sidebar'
 import { apiClient } from '@/lib/api'
 import type { PendingHire } from '@/lib/types'
-
-// Stub components — will be replaced by real implementations in later tasks
-function Dashboard() { return <div>Dashboard</div> }
-function OrgChart() { return <div>OrgChart</div> }
-function Issues() { return <div>Issues</div> }
-function Hiring() { return <div>Hiring</div> }
-function Audit() { return <div>Audit</div> }
+import { useWebSocket } from '@/hooks/useWebSocket'
+import { Dashboard } from '@/components/Dashboard'
+import { OrgChart } from '@/components/OrgChart'
+import { Issues } from '@/components/Issues'
+import { Hiring } from '@/components/Hiring'
+import { Audit } from '@/components/Audit'
 
 export function CompanyShell() {
   const { companyId } = useParams<{ companyId: string }>()
   const setCompanyId = useAppStore((s) => s.setCompanyId)
+
+  useWebSocket(companyId ?? null)
 
   useEffect(() => {
     if (companyId) setCompanyId(companyId)
