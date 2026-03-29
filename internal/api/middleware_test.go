@@ -68,3 +68,56 @@ func TestAuthMiddleware_HeaderStillWorks(t *testing.T) {
 		t.Fatal("handler was not called")
 	}
 }
+
+func TestAuthMiddleware_NoToken_Returns401(t *testing.T) {
+	s := makeTestServer()
+	called := false
+	handler := s.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	req := httptest.NewRequest("GET", "/", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if called {
+		t.Fatal("handler should not be called without token")
+	}
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+}
+
+func TestAuthMiddleware_WrongSecret_Returns401(t *testing.T) {
+	s := makeTestServer()
+	userID := uuid.New()
+	token := mintTestToken("wrong-secret", userID)
+	called := false
+	handler := s.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	req := httptest.NewRequest("GET", "/?token="+token, nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if called {
+		t.Fatal("handler should not be called with wrong secret")
+	}
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+}
+
+func TestAuthMiddleware_MalformedToken_Returns401(t *testing.T) {
+	s := makeTestServer()
+	called := false
+	handler := s.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	req := httptest.NewRequest("GET", "/?token=not.a.valid.jwt", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if called {
+		t.Fatal("handler should not be called with malformed token")
+	}
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+}
