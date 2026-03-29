@@ -19,13 +19,19 @@ const (
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
+		tokenStr := ""
+
+		// Prefer Authorization header; fall back to ?token= for WebSocket upgrades.
+		if h := r.Header.Get("Authorization"); h != "" {
+			tokenStr = strings.TrimPrefix(h, "Bearer ")
+		} else if q := r.URL.Query().Get("token"); q != "" {
+			tokenStr = q
+		}
+
+		if tokenStr == "" {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
-
-		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 		claims := &jwt.RegisteredClaims{}
 		token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
 			return []byte(s.jwtSecret), nil
