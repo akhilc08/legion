@@ -11,6 +11,7 @@ import { OrgChart } from '@/components/OrgChart'
 import { Issues } from '@/components/Issues'
 import { Hiring } from '@/components/Hiring'
 import { Audit } from '@/components/Audit'
+import { FSBrowser } from '@/components/FSBrowser'
 
 export function CompanyShell() {
   const { companyId } = useParams<{ companyId: string }>()
@@ -42,6 +43,7 @@ export function CompanyShell() {
           <Route path="issues" element={<Issues />} />
           <Route path="hiring" element={<Hiring />} />
           <Route path="audit" element={<Audit />} />
+          <Route path="files" element={<FSBrowser />} />
         </Routes>
       </main>
     </div>

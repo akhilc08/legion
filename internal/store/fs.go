@@ -83,6 +83,12 @@ func (db *DB) CascadePermissionsFromManager(ctx context.Context, agentID, manage
 	return err
 }
 
+// RevokeFSPermissionByID deletes a permission row by its UUID primary key.
+func (db *DB) RevokeFSPermissionByID(ctx context.Context, permID uuid.UUID) error {
+	_, err := db.Pool.Exec(ctx, `DELETE FROM fs_permissions WHERE id = $1`, permID)
+	return err
+}
+
 // ListFSPermissionsForCompany returns all fs_permissions for all agents in a company (for FS browser).
 func (db *DB) ListFSPermissionsForCompany(ctx context.Context, companyID uuid.UUID) ([]FSPermission, error) {
 	rows, err := db.Pool.Query(ctx,

@@ -116,6 +116,20 @@ export interface ChatMessage {
   timestamp: string
 }
 
+export interface FSEntry {
+  name: string
+  is_dir: boolean
+  size: number
+}
+
+export interface FSPermission {
+  id: string
+  agent_id: string
+  path: string
+  permission_level: 'read' | 'write' | 'admin'
+  granted_by: string | null
+}
+
 // WebSocket event envelope (matches ws.Event in Go)
 export interface WsEvent {
   type:

@@ -8,6 +8,7 @@ import {
   CircleDot,
   UserPlus,
   ScrollText,
+  FolderOpen,
 } from 'lucide-react'
 
 interface SidebarProps {
@@ -20,6 +21,7 @@ const navItems = [
   { label: 'Issues', icon: CircleDot, path: 'issues' },
   { label: 'Hiring', icon: UserPlus, path: 'hiring' },
   { label: 'Audit', icon: ScrollText, path: 'audit' },
+  { label: 'Files', icon: FolderOpen, path: 'files' },
 ]
 
 export function Sidebar({ hireBadgeCount }: SidebarProps) {

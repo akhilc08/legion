@@ -92,7 +92,8 @@ func (s *Server) Router() http.Handler {
 			r.Post("/hires/{hireID}/approve", s.handleApproveHire)
 			r.Post("/hires/{hireID}/reject", s.handleRejectHire)
 
-			// FS permissions
+			// FS permissions & browse
+			r.Get("/fs/browse", s.handleFSBrowse)
 			r.Get("/fs/permissions", s.handleListFSPermissions)
 			r.Post("/fs/permissions", s.handleGrantFSPermission)
 			r.Delete("/fs/permissions/{permID}", s.handleRevokeFSPermission)
