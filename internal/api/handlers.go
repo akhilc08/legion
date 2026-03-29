@@ -647,6 +647,9 @@ func (s *Server) handleListAuditLog(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	if logs == nil {
+		logs = []store.AuditLog{}
+	}
 	writeJSON(w, http.StatusOK, logs)
 }
 
@@ -656,6 +659,9 @@ func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	if ns == nil {
+		ns = []store.Notification{}
 	}
 	writeJSON(w, http.StatusOK, ns)
 }
