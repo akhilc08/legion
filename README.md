@@ -95,6 +95,61 @@ cd web && npx vitest run
 
 Coverage: 718 frontend tests across 27 files; full backend coverage for orchestrator, store, API handlers, heartbeat, agent runtimes, and WebSocket hub.
 
+## Benchmarks
+
+Measured on Apple M5, Go 1.22, `go test -bench=. -benchmem`. Run with `go test ./internal/... -bench=.`.
+
+### WebSocket fan-out (`internal/ws`)
+
+| Scenario | Latency | Allocs |
+|----------|---------|--------|
+| Broadcast → 1 client | 275 ns | 6 |
+| Broadcast → 10 clients | 1.36 µs | 6 |
+| Broadcast → 100 clients | 7.6 µs | 6 |
+| 10 concurrent writers → 50 clients | 444 ns | 6 |
+| BroadcastAll (5 companies × 10 clients) | 4.25 µs | 3 |
+| Register + unregister | 110 ns | 4 |
+
+Fan-out scales linearly at ~76 ns per additional client. Zero additional allocations regardless of subscriber count — the event is marshaled once and the same bytes are enqueued to every channel.
+
+### Stdout parser (`internal/stdout`)
+
+| Operation | Latency | Allocs |
+|-----------|---------|--------|
+| `IsControlLine` — hit | 1.9 ns | 0 |
+| `IsControlLine` — miss | 7.4 ns | 0 |
+| `ParseLine` (HEARTBEAT) | 69 ns | 3 |
+| `ParseLine` (HIRE with JSON) | 170 ns | 3 |
+| `DecodeHire` (full JSON unmarshal) | 453 ns | 7 |
+
+Every line of agent stdout passes through `IsControlLine` at ~2 ns with zero allocations.
+
+### Heartbeat watcher (`internal/heartbeat`)
+
+| Operation | Latency | Allocs |
+|-----------|---------|--------|
+| Check cycle — no stale agents | 1.6 ns | 0 |
+| Check cycle — stale agent found | 1.85 µs | 7 |
+| `RecordHeartbeat` | 0.64 ns | 0 |
+| `RecordHeartbeat` (parallel) | 0.19 ns | 0 |
+| Failure detection → callback | 2.3 µs | 20 |
+| Watch + Unwatch 50 agents | 47 µs | 459 |
+
+Detection callback fires in ~2.3 µs from the check cycle; actual wall-clock detection window is bounded by `CheckInterval` (20s) + `StaleThreshold` (20s).
+
+### Orchestrator coordination (`internal/orchestrator`)
+
+| Operation | Latency | Allocs |
+|-----------|---------|--------|
+| Issue checkout — sequential | 1.6 ns | 0 |
+| Issue checkout — 10 concurrent workers | 25 ns | 0 |
+| Issue checkout — 50 concurrent workers | 26 ns | 0 |
+| Wake-channel dispatch (assign loop signal) | 130 ns | 0 |
+| RWMutex read (runtime map, concurrent) | 40 ns | 0 |
+| RWMutex 90% read / 10% write | 13 ns | 0 |
+
+Checkout contention is near-flat from 10→50 concurrent workers (25 ns → 26 ns), confirming the coordinator doesn't bottleneck under agent-scale concurrency.
+
 ## Architecture
 
 See the inline doc comments in:
