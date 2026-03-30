@@ -142,6 +142,8 @@ export interface WsEvent {
     | 'chat_message'
     | 'escalation'
     | 'runtime_status'
+    | 'agent_hired'
+    | 'agent_approved'
   company_id: string
   payload: unknown
 }

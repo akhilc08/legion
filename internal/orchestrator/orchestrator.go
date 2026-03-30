@@ -28,14 +28,16 @@ type Runtimes struct {
 
 // Orchestrator is the central engine. One instance per server process.
 type Orchestrator struct {
-	db      *store.DB
-	hub     *ws.Hub
+	db      StoreIface
+	hub     HubIface
 	watcher *heartbeat.Watcher
 	fsRoot  string // base directory for company file systems
 
 	mu       sync.RWMutex
 	// Live runtime instances keyed by agent ID
 	runtimes map[uuid.UUID]agent.AgentRuntime
+	// Wake channels: signal an agent's assignLoop to check immediately
+	wakeChans map[uuid.UUID]chan struct{}
 	available Runtimes
 
 	// Runtime availability re-check ticker
@@ -43,12 +45,13 @@ type Orchestrator struct {
 }
 
 // New creates and initializes an Orchestrator.
-func New(db *store.DB, hub *ws.Hub, fsRoot string) *Orchestrator {
+func New(db StoreIface, hub HubIface, fsRoot string) *Orchestrator {
 	o := &Orchestrator{
 		db:               db,
 		hub:              hub,
 		fsRoot:           fsRoot,
 		runtimes:         make(map[uuid.UUID]agent.AgentRuntime),
+		wakeChans:        make(map[uuid.UUID]chan struct{}),
 		runtimeCheckStop: make(chan struct{}),
 	}
 
@@ -159,7 +162,11 @@ func (o *Orchestrator) markAgentsDegraded(ctx context.Context, runtime store.Age
 }
 
 // SpawnAgent starts a new agent subprocess and registers it with the heartbeat watcher.
+// Board agents (role="board") are virtual and never spawned.
 func (o *Orchestrator) SpawnAgent(ctx context.Context, a *store.Agent) error {
+	if a.Role == "board" {
+		return nil
+	}
 	workDir := filepath.Join(o.fsRoot, a.CompanyID.String(), "fs")
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		return fmt.Errorf("create workdir: %w", err)
@@ -206,8 +213,36 @@ func (o *Orchestrator) SpawnAgent(ctx context.Context, a *store.Agent) error {
 		Payload:   map[string]interface{}{"agent_id": a.ID, "status": store.StatusIdle, "pid": pid},
 	})
 
+	// Proactive heartbeat: record DB heartbeat as long as the OS process is alive.
+	// This prevents degraded/failed status for agents that haven't emitted CONDUCTOR_HEARTBEAT yet.
+	agentID := a.ID
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				o.mu.RLock()
+				liveRT, ok := o.runtimes[agentID]
+				o.mu.RUnlock()
+				if !ok {
+					return
+				}
+				if err := liveRT.Heartbeat(ctx); err == nil {
+					o.watcher.RecordHeartbeat(ctx, agentID) //nolint
+				}
+			}
+		}
+	}()
+
 	// Start issue assignment loop for this agent.
-	go o.assignLoop(ctx, a.ID, a.CompanyID)
+	wake := make(chan struct{}, 1)
+	o.mu.Lock()
+	o.wakeChans[agentID] = wake
+	o.mu.Unlock()
+	go o.assignLoop(ctx, agentID, a.CompanyID, wake)
 
 	return nil
 }
@@ -327,65 +362,112 @@ func (o *Orchestrator) SendChatMessage(ctx context.Context, agentID uuid.UUID, m
 	return reply, nil
 }
 
+// TriggerAssign immediately wakes an agent's assignLoop to check for new issues.
+func (o *Orchestrator) TriggerAssign(agentID uuid.UUID) {
+	o.mu.RLock()
+	wake, ok := o.wakeChans[agentID]
+	o.mu.RUnlock()
+	if ok {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// TriggerAssignCompany wakes all idle agents in a company to check for new issues.
+func (o *Orchestrator) TriggerAssignCompany(ctx context.Context, companyID uuid.UUID) {
+	agents, err := o.db.ListAgentsByCompany(ctx, companyID)
+	if err != nil {
+		return
+	}
+	for _, a := range agents {
+		if a.Status == store.StatusIdle {
+			o.TriggerAssign(a.ID)
+		}
+	}
+}
+
 // assignLoop periodically checks for ready issues and assigns them to an idle agent.
-func (o *Orchestrator) assignLoop(ctx context.Context, agentID, companyID uuid.UUID) {
+func (o *Orchestrator) assignLoop(ctx context.Context, agentID, companyID uuid.UUID, wake <-chan struct{}) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+
+	tryAssign := func() {
+		a, err := o.db.GetAgent(ctx, agentID)
+		if err != nil || (a.Status != store.StatusIdle && a.Status != store.StatusDegraded) {
+			return
+		}
+
+		issues, err := o.db.ListReadyIssues(ctx, companyID)
+		if err != nil {
+			log.Printf("assignLoop: list ready: %v", err)
+			return
+		}
+
+		for _, issue := range issues {
+			if issue.AssigneeID != nil && *issue.AssigneeID != agentID {
+				continue
+			}
+
+			checked, err := o.db.CheckoutIssue(ctx, issue.ID, agentID)
+			if err != nil || !checked {
+				continue
+			}
+
+			if err := o.db.UpdateAgentStatus(ctx, agentID, store.StatusWorking); err != nil {
+				log.Printf("assignLoop: update status: %v", err)
+			}
+
+			o.mu.RLock()
+			rt, ok := o.runtimes[agentID]
+			o.mu.RUnlock()
+			if !ok {
+				break
+			}
+
+			if err := rt.SendTask(ctx, issue); err != nil {
+				log.Printf("assignLoop: send task: %v", err)
+			}
+
+			// Update PID now that SendTask has actually started the process.
+			if pid := rt.PID(); pid != 0 {
+				o.db.UpdateAgentPID(ctx, agentID, &pid) //nolint
+			}
+
+			o.db.Log(ctx, companyID, &agentID, "ISSUE_ASSIGNED", map[string]interface{}{
+				"issue_id": issue.ID, "agent_id": agentID,
+			}) //nolint
+
+			o.hub.Broadcast(ws.Event{
+				Type:      ws.EventIssueUpdate,
+				CompanyID: companyID,
+				Payload: map[string]interface{}{
+					"issue_id": issue.ID, "status": store.IssueInProgress, "assignee_id": agentID,
+				},
+			})
+			o.hub.Broadcast(ws.Event{
+				Type:      ws.EventAgentStatus,
+				CompanyID: companyID,
+				Payload: map[string]interface{}{
+					"agent_id": agentID, "status": store.StatusWorking, "pid": rt.PID(),
+				},
+			})
+			break
+		}
+	}
+
+	// Check immediately on start.
+	tryAssign()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-wake:
+			tryAssign()
 		case <-ticker.C:
-			a, err := o.db.GetAgent(ctx, agentID)
-			if err != nil || a.Status != store.StatusIdle {
-				continue
-			}
-
-			issues, err := o.db.ListReadyIssues(ctx, companyID)
-			if err != nil {
-				log.Printf("assignLoop: list ready: %v", err)
-				continue
-			}
-
-			for _, issue := range issues {
-				if issue.AssigneeID != nil && *issue.AssigneeID != agentID {
-					continue
-				}
-
-				checked, err := o.db.CheckoutIssue(ctx, issue.ID, agentID)
-				if err != nil || !checked {
-					continue
-				}
-
-				if err := o.db.UpdateAgentStatus(ctx, agentID, store.StatusWorking); err != nil {
-					log.Printf("assignLoop: update status: %v", err)
-				}
-
-				o.mu.RLock()
-				rt, ok := o.runtimes[agentID]
-				o.mu.RUnlock()
-				if !ok {
-					break
-				}
-
-				if err := rt.SendTask(ctx, issue); err != nil {
-					log.Printf("assignLoop: send task: %v", err)
-				}
-
-				o.db.Log(ctx, companyID, &agentID, "ISSUE_ASSIGNED", map[string]interface{}{
-					"issue_id": issue.ID, "agent_id": agentID,
-				}) //nolint
-
-				o.hub.Broadcast(ws.Event{
-					Type:      ws.EventIssueUpdate,
-					CompanyID: companyID,
-					Payload: map[string]interface{}{
-						"issue_id": issue.ID, "status": store.IssueInProgress, "assignee_id": agentID,
-					},
-				})
-				break
-			}
+			tryAssign()
 		}
 	}
 }
@@ -437,6 +519,20 @@ func (o *Orchestrator) handleDone(ctx context.Context, agentID, companyID uuid.U
 			o.db.UpdateAgentStatus(ctx, agentID, store.StatusIdle) //nolint
 			if d.TokensUsed > 0 {
 				o.db.AddTokenSpend(ctx, agentID, d.TokensUsed, false) //nolint
+				// Check budget exhaustion (skip unlimited agents: budget 0 or max int).
+				if updated, err := o.db.GetAgent(ctx, agentID); err == nil &&
+					updated.MonthlyBudget > 0 && updated.MonthlyBudget < 2147483647 &&
+					updated.TokenSpend >= updated.MonthlyBudget {
+					o.db.UpdateAgentStatus(ctx, agentID, store.StatusPaused) //nolint
+					o.db.Log(ctx, companyID, &agentID, "BUDGET_EXHAUSTED", map[string]interface{}{
+						"spent": updated.TokenSpend, "budget": updated.MonthlyBudget,
+					}) //nolint
+					o.hub.Broadcast(ws.Event{
+						Type:      ws.EventNotification,
+						CompanyID: companyID,
+						Payload:   map[string]interface{}{"type": "budget_exhausted", "agent_id": agentID},
+					})
+				}
 			}
 			o.db.Log(ctx, companyID, &agentID, "ISSUE_COMPLETED", map[string]interface{}{
 				"issue_id": issue.ID, "output_path": d.OutputPath,
@@ -792,6 +888,16 @@ func (o *Orchestrator) reconcileOnBoot(ctx context.Context) error {
 	}
 
 	for _, c := range companies {
+		// Reset all in_progress issues to pending so agents can pick them up after restart.
+		if issues, err := o.db.ListIssuesByCompany(ctx, c.ID); err == nil {
+			for _, issue := range issues {
+				if issue.Status == store.IssueInProgress {
+					log.Printf("reconcile: resetting stuck issue %s (%q) to pending", issue.ID, issue.Title)
+					o.db.UpdateIssueStatus(ctx, issue.ID, store.IssuePending) //nolint
+				}
+			}
+		}
+
 		agents, err := o.db.ListAgentsByCompany(ctx, c.ID)
 		if err != nil {
 			log.Printf("reconcile: list agents for %s: %v", c.ID, err)
@@ -799,9 +905,12 @@ func (o *Orchestrator) reconcileOnBoot(ctx context.Context) error {
 		}
 		for _, a := range agents {
 			if a.Status == store.StatusIdle || a.Status == store.StatusWorking ||
-				a.Status == store.StatusPaused || a.Status == store.StatusBlocked {
+				a.Status == store.StatusPaused || a.Status == store.StatusBlocked ||
+				a.Status == store.StatusDegraded || a.Status == store.StatusFailed {
 				log.Printf("reconcile: respawning agent %s (%s)", a.ID, a.Role)
 				go func(ag store.Agent) {
+					// Reset to idle so spawn/assignLoop work correctly.
+					o.db.UpdateAgentStatus(ctx, ag.ID, store.StatusIdle) //nolint
 					if err := o.SpawnAgent(ctx, &ag); err != nil {
 						log.Printf("reconcile: spawn %s: %v", ag.ID, err)
 					}

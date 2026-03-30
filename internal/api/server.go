@@ -4,8 +4,6 @@ import (
 	"context"
 	"net/http"
 
-	"conductor/internal/orchestrator"
-	"conductor/internal/store"
 	"conductor/internal/ws"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -15,15 +13,15 @@ import (
 
 // Server holds all API dependencies.
 type Server struct {
-	db        *store.DB
+	db        Store
 	hub       *ws.Hub
-	orch      *orchestrator.Orchestrator
+	orch      Orchestrator
 	jwtSecret string
 	upgrader  websocket.Upgrader
 	staticDir string // path to built React app
 }
 
-func NewServer(db *store.DB, hub *ws.Hub, orch *orchestrator.Orchestrator, jwtSecret, staticDir string) *Server {
+func NewServer(db Store, hub *ws.Hub, orch Orchestrator, jwtSecret, staticDir string) *Server {
 	return &Server{
 		db:        db,
 		hub:       hub,
@@ -89,6 +87,7 @@ func (s *Server) Router() http.Handler {
 
 			// Hiring
 			r.Get("/hires", s.handleListPendingHires)
+			r.Post("/hires", s.handleCreateHire)
 			r.Post("/hires/{hireID}/approve", s.handleApproveHire)
 			r.Post("/hires/{hireID}/reject", s.handleRejectHire)
 
@@ -107,6 +106,9 @@ func (s *Server) Router() http.Handler {
 			r.Get("/ws", s.handleWebSocket)
 		})
 	})
+
+	// Static assets (JS, CSS, fonts, images)
+	r.Handle("/assets/*", http.StripPrefix("/assets", http.FileServer(http.Dir(s.staticDir+"/assets"))))
 
 	// React SPA fallback
 	r.Get("/*", s.handleSPA)

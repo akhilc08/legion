@@ -53,12 +53,16 @@ type AgentRuntime interface {
 
 // ControlMessage types emitted by agents on stdout.
 const (
-	ControlHire     = "CONDUCTOR_HIRE"
-	ControlEscalate = "CONDUCTOR_ESCALATE"
-	ControlDone     = "CONDUCTOR_DONE"
-	ControlBlocked  = "CONDUCTOR_BLOCKED"
+	ControlHire      = "CONDUCTOR_HIRE"
+	ControlEscalate  = "CONDUCTOR_ESCALATE"
+	ControlDone      = "CONDUCTOR_DONE"
+	ControlBlocked   = "CONDUCTOR_BLOCKED"
 	ControlHeartbeat = "CONDUCTOR_HEARTBEAT"
 )
+
+var controlPrefixes = []string{
+	ControlHire, ControlEscalate, ControlDone, ControlBlocked, ControlHeartbeat,
+}
 
 // HirePayload is the JSON body of a CONDUCTOR_HIRE message.
 type HirePayload struct {

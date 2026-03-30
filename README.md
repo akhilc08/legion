@@ -38,6 +38,7 @@ Open http://localhost:3100 — register an account, create a company, and start 
 # 1. Start Postgres and run migrations
 createdb conductor
 psql conductor < migrations/001_initial.sql
+psql conductor < migrations/002_board_agents.sql
 
 # 2. Build the React frontend
 cd web && npm install && npm run build && cd ..
@@ -81,6 +82,18 @@ Conductor auto-detects installed runtimes on startup. Unavailable runtimes are g
 | 4 | React UI: dashboard, org chart, issues, hiring, audit log | ✅ Done |
 | 5 | Agent chat, FS browser, cost tracking UI | ✅ Done |
 | 6 | Docker deployment, Tailscale docs, multi-company isolation | ✅ Done |
+
+## Testing
+
+```bash
+# Go backend (unit + integration tests, uses in-memory mocks — no DB required)
+go test ./...
+
+# React frontend (Vitest)
+cd web && npx vitest run
+```
+
+Coverage: 718 frontend tests across 27 files; full backend coverage for orchestrator, store, API handlers, heartbeat, agent runtimes, and WebSocket hub.
 
 ## Architecture
 

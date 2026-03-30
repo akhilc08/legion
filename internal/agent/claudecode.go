@@ -14,154 +14,125 @@ import (
 	"conductor/internal/store"
 )
 
-// ClaudeCodeRuntime manages a claude CLI subprocess.
-// It communicates via structured JSON on stdin/stdout using the claude --output-format json flag.
+// ClaudeCodeRuntime spawns a fresh `claude` process per task.
+// The claude CLI is a single-shot tool; it is not a persistent server.
+// We start a new process for each task, passing the task as the initial prompt via stdin.
 type ClaudeCodeRuntime struct {
-	mu         sync.Mutex
-	cmd        *exec.Cmd
-	stdin      io.WriteCloser
-	outputCh   chan string  // raw stdout lines
-	controlCh  chan string  // control message lines
-	doneCh     chan struct{} // closed when process exits
-	paused     bool
-	chatReplyCh chan string
-	pid        int
-	tokens     int64
+	mu      sync.Mutex
+	cmd     *exec.Cmd   // current running process, nil when idle
+	config  AgentConfig // set by Spawn, reused per task
+	pid     int
+	tokens  int64
+	alive   bool // true while a process is running
 
-	// OutputHandler is called for every non-control stdout line (task output).
-	OutputHandler func(line string)
-	// ControlHandler is called for every parsed control message.
+	OutputHandler  func(line string)
 	ControlHandler func(prefix string, payload json.RawMessage)
 }
 
 func NewClaudeCodeRuntime(outputHandler func(string), controlHandler func(string, json.RawMessage)) *ClaudeCodeRuntime {
 	return &ClaudeCodeRuntime{
-		outputCh:       make(chan string, 256),
-		controlCh:      make(chan string, 64),
-		doneCh:         make(chan struct{}),
-		chatReplyCh:    make(chan string, 1),
 		OutputHandler:  outputHandler,
 		ControlHandler: controlHandler,
 	}
 }
 
-var controlPrefixes = []string{
-	ControlHire,
-	ControlEscalate,
-	ControlDone,
-	ControlBlocked,
-	ControlHeartbeat,
-}
-
+// Spawn stores the agent config. No process is started yet.
 func (r *ClaudeCodeRuntime) Spawn(ctx context.Context, config AgentConfig) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.config = config
+	return nil
+}
+
+// SendTask spawns a new claude process with the issue as the initial user message.
+// Any in-progress task is killed first.
+func (r *ClaudeCodeRuntime) SendTask(ctx context.Context, issue store.Issue) error {
+	r.mu.Lock()
+	if r.cmd != nil && r.cmd.Process != nil {
+		r.cmd.Process.Kill() //nolint
+	}
+	r.mu.Unlock()
+
+	// Build the task prompt — plain text so the LLM understands it naturally.
+	taskText := fmt.Sprintf("Task ID: %s\nTitle: %s\n\n%s", issue.ID, issue.Title, issue.Description)
 
 	args := []string{
 		"--output-format", "stream-json",
-		"--system", config.SystemPrompt,
+		"--system", r.config.SystemPrompt,
 		"--no-interactive",
+		"--print", taskText,
 	}
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
-	cmd.Dir = config.WorkDir
-
-	// Inject agent-specific env vars
-	cmd.Env = append(cmd.Environ(), fmt.Sprintf("CONDUCTOR_AGENT_ID=%s", config.AgentID.String()))
-	for k, v := range config.EnvVars {
+	cmd.Dir = r.config.WorkDir
+	cmd.Env = append(cmd.Environ(),
+		fmt.Sprintf("CONDUCTOR_AGENT_ID=%s", r.config.AgentID.String()),
+		fmt.Sprintf("CONDUCTOR_COMPANY_ID=%s", r.config.CompanyID.String()),
+	)
+	for k, v := range r.config.EnvVars {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
-	}
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("stdin pipe: %w", err)
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("stderr pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start claude: %w", err)
 	}
 
+	r.mu.Lock()
 	r.cmd = cmd
-	r.stdin = stdin
 	r.pid = cmd.Process.Pid
-	close(r.doneCh)
-	r.doneCh = make(chan struct{})
+	r.alive = true
+	r.mu.Unlock()
 
-	go r.readStdout(stdout)
-	go r.dispatchOutput()
+	go r.readOutput(stdout)
+	go io.Copy(io.Discard, stderr) //nolint
 	go func() {
 		cmd.Wait() //nolint
-		close(r.doneCh)
+		r.mu.Lock()
+		r.alive = false
+		r.mu.Unlock()
 	}()
 
 	return nil
 }
 
-func (r *ClaudeCodeRuntime) readStdout(stdout io.Reader) {
+func (r *ClaudeCodeRuntime) readOutput(stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		// Check for control messages first.
 		isControl := false
 		for _, prefix := range controlPrefixes {
 			if strings.HasPrefix(line, prefix+" ") || line == prefix {
 				isControl = true
-				select {
-				case r.controlCh <- line:
-				default:
-				}
+				r.handleControl(line)
 				break
 			}
 		}
-		if !isControl {
-			select {
-			case r.outputCh <- line:
-			default:
-			}
+		if isControl {
+			continue
 		}
-	}
-}
 
-func (r *ClaudeCodeRuntime) dispatchOutput() {
-	for {
-		select {
-		case line, ok := <-r.outputCh:
-			if !ok {
-				return
-			}
-			// Parse token usage from claude's JSON stream output
-			r.tryParseTokens(line)
+		// Try to parse tokens from stream-json output.
+		r.tryParseTokens(line)
 
-			r.mu.Lock()
-			paused := r.paused
-			r.mu.Unlock()
-
-			if paused {
-				// During pause, route output as chat reply
-				select {
-				case r.chatReplyCh <- line:
-				default:
-				}
-			} else if r.OutputHandler != nil {
-				r.OutputHandler(line)
-			}
-
-		case line, ok := <-r.controlCh:
-			if !ok {
-				return
-			}
-			r.handleControl(line)
+		if r.OutputHandler != nil {
+			r.OutputHandler(line)
 		}
 	}
 }
 
 func (r *ClaudeCodeRuntime) tryParseTokens(line string) {
-	// claude --output-format stream-json emits usage objects
 	var msg struct {
 		Type  string `json:"type"`
 		Usage struct {
@@ -181,8 +152,7 @@ func (r *ClaudeCodeRuntime) handleControl(line string) {
 	}
 	for _, prefix := range controlPrefixes {
 		if strings.HasPrefix(line, prefix) {
-			rest := strings.TrimPrefix(line, prefix)
-			rest = strings.TrimSpace(rest)
+			rest := strings.TrimSpace(strings.TrimPrefix(line, prefix))
 			var raw json.RawMessage
 			if len(rest) > 0 {
 				raw = json.RawMessage(rest)
@@ -195,97 +165,36 @@ func (r *ClaudeCodeRuntime) handleControl(line string) {
 	}
 }
 
-func (r *ClaudeCodeRuntime) SendTask(ctx context.Context, issue store.Issue) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.stdin == nil {
-		return fmt.Errorf("agent not running")
-	}
-
-	msg := map[string]interface{}{
-		"type":        "user",
-		"issue_id":    issue.ID.String(),
-		"title":       issue.Title,
-		"description": issue.Description,
-	}
-	data, _ := json.Marshal(msg)
-	_, err := fmt.Fprintf(r.stdin, "%s\n", data)
-	return err
-}
-
-func (r *ClaudeCodeRuntime) SendChat(ctx context.Context, message string) (string, error) {
-	r.mu.Lock()
-	if r.stdin == nil {
-		r.mu.Unlock()
-		return "", fmt.Errorf("agent not running")
-	}
-	r.mu.Unlock()
-
-	msg := map[string]interface{}{
-		"type":    "human_chat",
-		"content": message,
-	}
-	data, _ := json.Marshal(msg)
-	if _, err := fmt.Fprintf(r.stdin, "%s\n", data); err != nil {
-		return "", err
-	}
-
-	select {
-	case reply := <-r.chatReplyCh:
-		return reply, nil
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
-}
-
+// Heartbeat returns nil if the process is currently running, error if idle.
 func (r *ClaudeCodeRuntime) Heartbeat(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.cmd == nil || r.cmd.Process == nil {
-		return fmt.Errorf("not running")
+	if r.alive && r.cmd != nil && r.cmd.Process != nil {
+		return r.cmd.Process.Signal(nil) //nolint
 	}
-	// Process.Signal(0) checks if process is alive
-	return r.cmd.Process.Signal(nil) //nolint — nil signal checks liveness
+	// No task running — that's fine, agent is idle. Treat as alive.
+	return nil
 }
 
-func (r *ClaudeCodeRuntime) Pause(ctx context.Context) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.paused = true
-
-	if r.stdin == nil {
-		return fmt.Errorf("agent not running")
-	}
-	msg := map[string]string{"type": "pause"}
-	data, _ := json.Marshal(msg)
-	_, err := fmt.Fprintf(r.stdin, "%s\n", data)
-	return err
+func (r *ClaudeCodeRuntime) SendChat(ctx context.Context, message string) (string, error) {
+	return "", fmt.Errorf("chat not supported while agent is idle; pause first")
 }
 
-func (r *ClaudeCodeRuntime) Resume(ctx context.Context) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.paused = false
-
-	if r.stdin == nil {
-		return fmt.Errorf("agent not running")
-	}
-	msg := map[string]string{"type": "resume"}
-	data, _ := json.Marshal(msg)
-	_, err := fmt.Fprintf(r.stdin, "%s\n", data)
-	return err
-}
+func (r *ClaudeCodeRuntime) Pause(ctx context.Context) error  { return nil }
+func (r *ClaudeCodeRuntime) Resume(ctx context.Context) error { return nil }
 
 func (r *ClaudeCodeRuntime) Kill(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.cmd == nil || r.cmd.Process == nil {
-		return nil
+	if r.cmd != nil && r.cmd.Process != nil {
+		return r.cmd.Process.Kill()
 	}
-	return r.cmd.Process.Kill()
+	return nil
 }
 
 func (r *ClaudeCodeRuntime) PID() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return r.pid
 }
 

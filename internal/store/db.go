@@ -5,12 +5,24 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// DB wraps a pgxpool for shared use across all store types.
+// PgxPool is the minimal pgx pool interface used by store operations.
+// *pgxpool.Pool satisfies this interface; tests inject a mock.
+type PgxPool interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Ping(ctx context.Context) error
+	Close()
+}
+
+// DB wraps a PgxPool for shared use across all store types.
 type DB struct {
-	Pool *pgxpool.Pool
+	Pool PgxPool
 }
 
 func Connect(ctx context.Context) (*DB, error) {

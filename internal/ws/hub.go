@@ -20,15 +20,15 @@ type Event struct {
 
 // EventType constants used throughout the system.
 const (
-	EventAgentStatus    = "agent_status"
-	EventAgentLog       = "agent_log"
-	EventIssueUpdate    = "issue_update"
-	EventHeartbeat      = "heartbeat"
-	EventNotification   = "notification"
-	EventHirePending    = "hire_pending"
-	EventChatMessage    = "chat_message"
-	EventEscalation     = "escalation"
-	EventRuntimeStatus  = "runtime_status"
+	EventAgentStatus   = "agent_status"
+	EventAgentLog      = "agent_log"
+	EventIssueUpdate   = "issue_update"
+	EventHeartbeat     = "heartbeat"
+	EventNotification  = "notification"
+	EventHirePending   = "hire_pending"
+	EventChatMessage   = "chat_message"
+	EventEscalation    = "escalation"
+	EventRuntimeStatus = "runtime_status"
 )
 
 // client is a single connected WebSocket subscriber.
@@ -36,6 +36,7 @@ type client struct {
 	conn      *websocket.Conn
 	companyID uuid.UUID
 	send      chan []byte
+	quit      chan struct{} // closed by readPump to signal writePump to stop
 }
 
 // Hub manages all active WebSocket connections, bucketed by company.
@@ -57,6 +58,7 @@ func (h *Hub) Register(conn *websocket.Conn, companyID uuid.UUID) <-chan struct{
 		conn:      conn,
 		companyID: companyID,
 		send:      make(chan []byte, 256),
+		quit:      make(chan struct{}),
 	}
 
 	h.mu.Lock()
@@ -72,7 +74,7 @@ func (h *Hub) Register(conn *websocket.Conn, companyID uuid.UUID) <-chan struct{
 		delete(h.clients[companyID], c)
 		h.mu.Unlock()
 	})
-	go c.readPump() // consume pings from client (keeps connection alive)
+	go c.readPump() // consume pings; signals writePump via quit on disconnect
 
 	return done
 }
@@ -125,15 +127,27 @@ func (c *client) writePump(done chan<- struct{}, onClose func()) {
 		close(done)
 	}()
 
-	for msg := range c.send {
-		if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+	for {
+		select {
+		case msg, ok := <-c.send:
+			if !ok {
+				// send channel closed (should not happen with current design, but handle gracefully)
+				return
+			}
+			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+				return
+			}
+		case <-c.quit:
 			return
 		}
 	}
 }
 
 func (c *client) readPump() {
-	defer c.conn.Close()
+	defer func() {
+		c.conn.Close()
+		close(c.quit)
+	}()
 	for {
 		_, _, err := c.conn.ReadMessage()
 		if err != nil {

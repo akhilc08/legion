@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -120,6 +121,15 @@ func (s *Server) handleCreateCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.db.AddUserToCompany(r.Context(), userID, company.ID, "admin") //nolint
+	// Seed Board agent for new company.
+	s.db.CreateAgent(r.Context(), &store.Agent{ //nolint
+		CompanyID:     company.ID,
+		Role:          "board",
+		Title:         "Board",
+		SystemPrompt:  "You are the Board. You represent the human operator.",
+		Runtime:       store.RuntimeClaudeCode,
+		MonthlyBudget: 2147483647,
+	})
 	writeJSON(w, http.StatusCreated, company)
 }
 
@@ -236,6 +246,8 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Auto-spawn immediately (board agents are no-ops in SpawnAgent).
+	go s.orch.SpawnAgent(context.Background(), created) //nolint
 	writeJSON(w, http.StatusCreated, created)
 }
 
@@ -410,6 +422,10 @@ func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	if body.Title == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "title is required"})
+		return
+	}
 	userID, _ := userIDFromCtx(r)
 	_ = userID
 	issue := &store.Issue{
@@ -421,8 +437,20 @@ func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := s.db.CreateIssue(r.Context(), issue)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		msg := err.Error()
+		status := http.StatusInternalServerError
+		if strings.Contains(msg, "foreign key") || strings.Contains(msg, "assignee_id") {
+			status = http.StatusUnprocessableEntity
+			msg = "assignee_id does not refer to a valid agent"
+		}
+		writeJSON(w, status, map[string]string{"error": msg})
 		return
+	}
+	// Wake the assigned agent (or all idle agents) immediately.
+	if body.AssigneeID != nil {
+		s.orch.TriggerAssign(*body.AssigneeID)
+	} else {
+		go s.orch.TriggerAssignCompany(context.Background(), companyID)
 	}
 	writeJSON(w, http.StatusCreated, created)
 }
@@ -510,6 +538,47 @@ func (s *Server) handleRemoveDependency(w http.ResponseWriter, r *http.Request) 
 
 // ── Hiring ────────────────────────────────────────────────────────────────────
 
+func (s *Server) handleCreateHire(w http.ResponseWriter, r *http.Request) {
+	companyID, _ := companyIDFromCtx(r)
+	var body struct {
+		RequestedByAgentID uuid.UUID  `json:"requested_by_agent_id"`
+		RoleTitle          string     `json:"role_title"`
+		ReportingToAgentID uuid.UUID  `json:"reporting_to_agent_id"`
+		SystemPrompt       string     `json:"system_prompt"`
+		Runtime            string     `json:"runtime"`
+		BudgetAllocation   int        `json:"budget_allocation"`
+		InitialTask        *string    `json:"initial_task"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if body.RoleTitle == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "role_title is required"})
+		return
+	}
+	if body.Runtime == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "runtime is required"})
+		return
+	}
+	h := &store.PendingHire{
+		CompanyID:          companyID,
+		RequestedByAgentID: body.RequestedByAgentID,
+		RoleTitle:          body.RoleTitle,
+		ReportingToAgentID: body.ReportingToAgentID,
+		SystemPrompt:       body.SystemPrompt,
+		Runtime:            store.AgentRuntime(body.Runtime),
+		BudgetAllocation:   body.BudgetAllocation,
+		InitialTask:        body.InitialTask,
+	}
+	created, err := s.db.CreatePendingHire(r.Context(), h)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
+}
+
 func (s *Server) handleListPendingHires(w http.ResponseWriter, r *http.Request) {
 	companyID, _ := companyIDFromCtx(r)
 	hires, err := s.db.ListPendingHires(r.Context(), companyID)
@@ -530,7 +599,15 @@ func (s *Server) handleApproveHire(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.orch.ApproveHire(r.Context(), hireID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		msg := err.Error()
+		status := http.StatusInternalServerError
+		if strings.Contains(msg, "not pending") {
+			status = http.StatusConflict
+		} else if strings.Contains(msg, "no rows") {
+			status = http.StatusNotFound
+			msg = "hire not found"
+		}
+		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "approved"})
@@ -606,8 +683,17 @@ func (s *Server) handleFSBrowse(w http.ResponseWriter, r *http.Request) {
 		relPath = "/"
 	}
 	fsRoot := filepath.Join("/conductor/companies", companyID.String(), "fs")
-	target := filepath.Join(fsRoot, filepath.Clean("/"+relPath))
-	if !strings.HasPrefix(target, fsRoot) {
+	// Clean relPath as a rooted path to resolve any ".." components, then
+	// join with fsRoot. Verify the result is still under fsRoot to block traversal.
+	cleanedRel := filepath.Clean("/" + relPath) // absolute, e.g. /etc/passwd for ../../etc/passwd
+	// Reject any cleaned path that contains ".." or escapes root via the
+	// original relPath traversal attempt.
+	if strings.Contains(relPath, "..") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
+		return
+	}
+	target := filepath.Join(fsRoot, cleanedRel)
+	if !strings.HasPrefix(target, fsRoot+"/") && target != fsRoot {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
 		return
 	}

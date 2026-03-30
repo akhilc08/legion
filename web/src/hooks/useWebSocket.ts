@@ -24,6 +24,11 @@ export function patchCacheFromEvent(qc: QueryClient, event: WsEvent) {
     case 'escalation':
       qc.invalidateQueries({ queryKey: ['notifications', companyId] })
       break
+    case 'agent_hired':
+    case 'agent_approved':
+      qc.invalidateQueries({ queryKey: ['agents', companyId] })
+      qc.invalidateQueries({ queryKey: ['hires', companyId] })
+      break
     default:
       break
   }

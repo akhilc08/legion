@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useAppStore } from '@/store/useAppStore'
 import { Sidebar } from '@/components/Layout/Sidebar'
 import { apiClient } from '@/lib/api'
-import type { PendingHire } from '@/lib/types'
+import type { Agent, PendingHire } from '@/lib/types'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { Dashboard } from '@/components/Dashboard'
 import { OrgChart } from '@/components/OrgChart'
@@ -12,10 +12,13 @@ import { Issues } from '@/components/Issues'
 import { Hiring } from '@/components/Hiring'
 import { Audit } from '@/components/Audit'
 import { FSBrowser } from '@/components/FSBrowser'
+import { DetailPanel } from '@/components/OrgChart/DetailPanel'
 
 export function CompanyShell() {
   const { companyId } = useParams<{ companyId: string }>()
   const setCompanyId = useAppStore((s) => s.setCompanyId)
+  const selectedAgentId = useAppStore((s) => s.agentId)
+  const setAgentId = useAppStore((s) => s.setAgentId)
 
   useWebSocket(companyId ?? null)
 
@@ -25,16 +28,22 @@ export function CompanyShell() {
 
   const { data: hires = [] } = useQuery<PendingHire[]>({
     queryKey: ['hires', companyId],
-    queryFn: () =>
-      apiClient.get(`/api/companies/${companyId}/hires`).then((r) => r.data),
+    queryFn: () => apiClient.get(`/api/companies/${companyId}/hires`).then((r) => r.data),
     enabled: !!companyId,
   })
 
-  const pendingCount = hires.filter((h) => h.status === 'pending').length
+  const { data: agents = [] } = useQuery<Agent[]>({
+    queryKey: ['agents', companyId],
+    queryFn: () => apiClient.get(`/api/companies/${companyId}/agents`).then((r) => r.data),
+    enabled: !!companyId,
+  })
+
+  const pendingCount = (Array.isArray(hires) ? hires : []).filter((h) => h.status === 'pending').length
+  const selectedAgent = (Array.isArray(agents) ? agents : []).find((a) => a.id === selectedAgentId) ?? null
 
   return (
     <div className="flex h-screen overflow-hidden">
-      <Sidebar hireBadgeCount={pendingCount} />
+      <Sidebar hireBadgeCount={pendingCount} agents={Array.isArray(agents) ? agents : []} />
       <main className="flex-1 overflow-auto bg-zinc-950">
         <Routes>
           <Route index element={<Navigate to="dashboard" replace />} />
@@ -46,6 +55,9 @@ export function CompanyShell() {
           <Route path="files" element={<FSBrowser />} />
         </Routes>
       </main>
+      {selectedAgent && (
+        <DetailPanel agent={selectedAgent} onClose={() => setAgentId(null)} />
+      )}
     </div>
   )
 }

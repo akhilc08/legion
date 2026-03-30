@@ -38,7 +38,8 @@ export function DetailPanel({ agent, onClose }: DetailPanelProps) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['agents', companyId] }),
   })
 
-  const budgetPct = Math.min(100, Math.round((agent.token_spend / agent.monthly_budget) * 100))
+  const unlimited = agent.monthly_budget === 0 || agent.monthly_budget >= 2147483647
+  const budgetPct = unlimited ? 0 : Math.min(100, Math.round((agent.token_spend / agent.monthly_budget) * 100))
 
   return (
     <div className="w-72 border-l border-zinc-800 bg-zinc-950 p-4 flex flex-col gap-4 overflow-y-auto">
@@ -59,12 +60,12 @@ export function DetailPanel({ agent, onClose }: DetailPanelProps) {
       )}
       <div>
         <div className="flex justify-between text-xs text-zinc-500 mb-1">
-          <span>Token budget</span><span>{budgetPct}%</span>
+          <span>Token budget</span><span>{unlimited ? '∞' : `${budgetPct}%`}</span>
         </div>
         <div className="h-1.5 rounded-full bg-zinc-800">
           <div className={cn('h-1.5 rounded-full', budgetPct > 80 ? 'bg-red-500' : budgetPct > 50 ? 'bg-amber-500' : 'bg-emerald-500')} style={{ width: `${budgetPct}%` }} />
         </div>
-        <p className="text-xs text-zinc-600 mt-1">{agent.token_spend.toLocaleString()} / {agent.monthly_budget.toLocaleString()} tokens</p>
+        <p className="text-xs text-zinc-600 mt-1">{agent.token_spend.toLocaleString()} / {unlimited ? '∞' : agent.monthly_budget.toLocaleString()} tokens</p>
       </div>
       <div className="space-y-2">
         {agent.status === 'idle' && <Button size="sm" className="w-full" disabled={spawn.isPending} onClick={() => spawn.mutate()}>Spawn</Button>}

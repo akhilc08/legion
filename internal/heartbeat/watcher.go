@@ -38,14 +38,14 @@ type DegradedHandler func(ctx context.Context, agentID uuid.UUID, companyID uuid
 
 // Watcher runs a goroutine-per-agent heartbeat monitor.
 type Watcher struct {
-	db             *store.DB
+	db             StoreIface
 	onFailed       FailureHandler
 	onDegraded     DegradedHandler
 	mu             sync.Mutex
 	watching       map[uuid.UUID]context.CancelFunc
 }
 
-func NewWatcher(db *store.DB, onFailed FailureHandler, onDegraded DegradedHandler) *Watcher {
+func NewWatcher(db StoreIface, onFailed FailureHandler, onDegraded DegradedHandler) *Watcher {
 	return &Watcher{
 		db:         db,
 		onFailed:   onFailed,

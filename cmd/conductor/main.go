@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -89,17 +90,25 @@ func main() {
 }
 
 func runMigrations(ctx context.Context, db *store.DB) error {
-	data, err := os.ReadFile("migrations/001_initial.sql")
+	entries, err := os.ReadDir("migrations")
 	if err != nil {
 		return err
 	}
-	_, err = db.Pool.Exec(ctx, string(data))
-	if err != nil {
-		// Ignore "already exists" errors — schema is already applied.
-		if strings.Contains(err.Error(), "already exists") {
-			return nil
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
 		}
-		return err
+		data, err := os.ReadFile("migrations/" + e.Name())
+		if err != nil {
+			return err
+		}
+		if _, err := db.Pool.Exec(ctx, string(data)); err != nil {
+			if strings.Contains(err.Error(), "already exists") {
+				continue
+			}
+			return fmt.Errorf("migration %s: %w", e.Name(), err)
+		}
+		log.Printf("conductor: migration %s applied", e.Name())
 	}
 	return nil
 }

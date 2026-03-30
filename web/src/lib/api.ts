@@ -16,9 +16,11 @@ apiClient.interceptors.request.use((config) => {
 apiClient.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401) {
+    const url: string = err.config?.url ?? ''
+    const isAuthEndpoint = url.includes('/api/auth/')
+    if (err.response?.status === 401 && !isAuthEndpoint) {
       localStorage.removeItem('legion_token')
-      window.location.href = '/login'
+      window.location.href = '/'
     }
     return Promise.reject(err)
   }
