@@ -1,12 +1,12 @@
-# Conductor
+# Legion
 
-Distributed AI Agent Orchestration Engine. A Go-based rebuild of [Paperclip](https://github.com/paperclipai/paperclip) with real distributed systems guarantees.
+Distributed AI Agent Orchestration Engine built in Go — exactly-once task execution, heartbeat-based failure detection, and sub-8µs WebSocket fan-out.
 
-**Stack:** Go · PostgreSQL · WebSockets · React · SSH/SFTP · Claude Code CLI · OpenClaw
+**Stack:** Go · PostgreSQL · WebSockets · React · SSH/SFTP · Claude Code CLI
 
 ## What it does
 
-Conductor spins up teams of AI agents (Claude Code or OpenClaw) organized as a company hierarchy. A CEO agent decomposes goals into issues, delegates work down the org chart, and manages hiring, escalation, and coordination — all surfaced in an interactive React UI.
+Legion spins up teams of AI agents organized as a company hierarchy. A CEO agent decomposes goals into issues, delegates work down the org chart, and manages hiring, escalation, and coordination — all surfaced in an interactive React UI.
 
 Key features:
 - Interactive drag-drop org chart (React Flow) — restructure the company live
